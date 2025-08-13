@@ -22,6 +22,7 @@ namespace MRMotifs.SharedAssets
         [SerializeField] private float fadeInSeconds = 7.0f;
 
         private WorldSpacePanel panel;
+        private bool hasPlayedOnce = false;
 
         private void Reset()
         {
@@ -31,51 +32,63 @@ namespace MRMotifs.SharedAssets
         private void Awake()
         {
             panel = GetComponent<WorldSpacePanel>();
-            panel.ConfigureSizeMeters(widthMeters, heightMeters);
-            panel.ConfigureBillboarding(true, 1.5f);
+			// Respect your prefab's authored RectTransform size and scale
+			panel.SetEnforceSizeInMeters(false);
+			// Disable billboarding entirely per request
+			panel.ConfigureBillboarding(false, 0f);
             panel.ConfigureDistance(0.88f);
+            // Alert controls its own appear; prevent auto animation so we can place first, then slow fade.
+            panel.SetAutoPlayOnEnable(false);
         }
 
         private void OnEnable()
         {
-            // Override the panel's appear with the slower 7s fade-in requirement for alerts.
-            StartCoroutine(PlaySequence());
+            // Only play the sequence once to prevent looping
+            if (!hasPlayedOnce)
+            {
+                hasPlayedOnce = true;
+                StartCoroutine(PlaySequence());
+            }
         }
 
-        private IEnumerator PlaySequence()
+		private IEnumerator PlaySequence()
         {
-            // Position at final pose and then run a slow manual fade in
-            var cachedDuration = 0.3f;
-            // Place at final pose first
-            var cam = Camera.main ? Camera.main.transform : null;
-            if (cam != null)
+            // Wait for a camera (panel will wire up its own camera in Awake)
+            var canvas = GetComponent<Canvas>();
+            while ((canvas && canvas.worldCamera == null) && Camera.main == null)
             {
-                var forward = cam.forward; forward.y = 0f; forward.Normalize();
-                transform.position = cam.position + forward * 0.88f;
-                transform.rotation = Quaternion.LookRotation(forward, Vector3.up);
+                yield return null;
             }
 
-            var canvasGroup = GetComponent<CanvasGroup>();
+			// Place at final pose using the panel helper so yaw/position match the main panel
+			panel.PlaceAtFinalPose();
+
+			var canvasGroup = GetComponent<CanvasGroup>();
             if (!canvasGroup)
             {
                 canvasGroup = gameObject.AddComponent<CanvasGroup>();
             }
             canvasGroup.alpha = 0f;
 
-            float elapsed = 0f;
-            while (elapsed < fadeInSeconds)
-            {
-                elapsed += Time.deltaTime;
-                float t = Mathf.Clamp01(elapsed / fadeInSeconds);
-                canvasGroup.alpha = t;
-                yield return null;
-            }
+			// Fade in over assignment duration (alert requirement says 7s fade-in)
+			float elapsed = 0f;
+			while (elapsed < fadeInSeconds)
+			{
+				elapsed += Time.deltaTime;
+				float t = Mathf.Clamp01(elapsed / fadeInSeconds);
+				canvasGroup.alpha = t;
+				yield return null;
+			}
             canvasGroup.alpha = 1f;
 
             yield return new WaitForSeconds(visibleHoldSeconds);
 
             // Fade out over the default 0.3s using the WorldSpacePanel animation so it also Z- retreats
-            panel.PlayDisappear(() => gameObject.SetActive(false));
+			panel.PlayDisappear(() => {
+                gameObject.SetActive(false);
+                // Reset so it can play again if manually re-enabled
+                hasPlayedOnce = false;
+            });
         }
     }
 }

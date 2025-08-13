@@ -3,6 +3,8 @@
 using System.Collections;
 using UnityEngine;
 using UnityEngine.UI;
+using System;
+using System.Linq;
 
 namespace MRMotifs.SharedAssets
 {
@@ -16,6 +18,8 @@ namespace MRMotifs.SharedAssets
     public class WorldSpacePanel : MonoBehaviour
     {
         [Header("Sizing (meters)")]
+        [Tooltip("If true, the RectTransform will be forced to the width/height below in meters on Awake. Turn off to respect prefab size.")]
+        [SerializeField] private bool enforceSizeInMeters = true;
         [SerializeField] private float widthMeters = 0.662f;
         [SerializeField] private float heightMeters = 0.442f;
 
@@ -27,6 +31,15 @@ namespace MRMotifs.SharedAssets
 
         [Header("Animation")]
         [SerializeField] private float animateDurationSeconds = 0.3f;
+        public float AnimateDurationSeconds => animateDurationSeconds;
+
+        [Header("Interaction")]
+        [Tooltip("CanvasGroup becomes interactable/blocks raycasts when alpha >= this value")]
+        [Range(0f, 1f)]
+        [SerializeField] private float interactableAlphaThreshold = 1f;
+
+        [Tooltip("If true, appear/disappear movement is computed relative to the panel's own transform instead of the camera. Useful for hand-placed panels.")]
+        [SerializeField] private bool animateRelativeToSelf = false;
 
         [Header("Billboarding")]
         [Tooltip("Enable billboard facing the user around the Y axis only.")]
@@ -38,6 +51,18 @@ namespace MRMotifs.SharedAssets
         [Header("Layering")]
         [Tooltip("Layer to apply to this panel (e.g., UI_Passthrough) to exclude from post-processing.")]
         [SerializeField] private string layerName = "UI_Passthrough";
+
+        [Header("Camera")]
+        [Tooltip("Optional explicit camera to use instead of Camera.main (recommended for builds/XR rigs). Also assigned to Canvas.worldCamera for raycasting.")]
+        [SerializeField] private Camera cameraOverride;
+
+        [Header("Lifecycle")]
+        [Tooltip("Automatically play appear animation on enable. Disable if another controller drives the appear sequence (e.g., AlertPanelController).")]
+        [SerializeField] private bool autoPlayOnEnable = true;
+
+        [Header("Placement Control")]
+        [Tooltip("If true, this component will compute and set position/rotation in front of the camera. Turn off to preserve your authored transform.")]
+        [SerializeField] private bool managePlacement = true;
 
         private RectTransform rectTransform;
         private Canvas canvas;
@@ -61,6 +86,14 @@ namespace MRMotifs.SharedAssets
                 canvas = gameObject.AddComponent<Canvas>();
             }
             canvas.renderMode = RenderMode.WorldSpace;
+            // Ensure a UI raycaster is present so world-space UI can receive pointer events
+            var graphicRaycaster = GetComponent<GraphicRaycaster>();
+            if (!graphicRaycaster) graphicRaycaster = gameObject.AddComponent<GraphicRaycaster>();
+
+            // Prefer Meta OVRRaycaster when Oculus/Meta Interaction SDK is present
+            TryEnableOVRRaycaster(graphicRaycaster);
+            // Optionally enable Input System TrackedDeviceRaycaster if the package exists (reflection-based)
+            TryEnableTrackedDeviceRaycaster();
             var scaler = GetComponent<CanvasScaler>();
             if (scaler)
             {
@@ -74,8 +107,11 @@ namespace MRMotifs.SharedAssets
             {
                 rectTransform = transform as RectTransform;
             }
-            rectTransform.sizeDelta = new Vector2(widthMeters, heightMeters);
-            rectTransform.localScale = Vector3.one; // 1 unit == 1 meter
+            if (enforceSizeInMeters)
+            {
+                rectTransform.sizeDelta = new Vector2(widthMeters, heightMeters);
+            }
+            // Respect authored scale unless explicitly requested elsewhere
 
             // Assign layer if it exists
             var layerIndex = LayerMask.NameToLayer(layerName);
@@ -85,34 +121,50 @@ namespace MRMotifs.SharedAssets
             }
 
             // Camera
-            mainCamera = Camera.main;
+            mainCamera = cameraOverride != null ? cameraOverride : Camera.main;
             if (!mainCamera)
             {
                 StartCoroutine(FetchMainCamera());
+            }
+            else
+            {
+                if (canvas) canvas.worldCamera = mainCamera;
             }
         }
 
         private IEnumerator FetchMainCamera()
         {
-            while (!(mainCamera = Camera.main))
+            while (!(mainCamera = (cameraOverride != null ? cameraOverride : Camera.main)))
             {
                 yield return null;
             }
             // Re-place when camera becomes available
-            PlaceAtFinalPose();
+            if (canvas) canvas.worldCamera = mainCamera;
+            if (managePlacement)
+            {
+                PlaceAtFinalPose();
+            }
         }
 
         private void OnEnable()
         {
             if (!mainCamera)
             {
-                mainCamera = Camera.main;
+                mainCamera = cameraOverride != null ? cameraOverride : Camera.main;
             }
 
-            // Start hidden and slightly farther away, then animate in
-            PlaceForAppearStart();
+            // Start hidden; optionally animate in once camera is ready
             SetOpacity(0f);
-            PlayAppear();
+            if (autoPlayOnEnable)
+            {
+                if (runningAnim != null) StopCoroutine(runningAnim);
+                // Compute from the current camera forward at enable
+                if (managePlacement)
+                {
+                    PlaceForAppearStart();
+                }
+                runningAnim = StartCoroutine(AnimateAppear());
+            }
         }
 
         private void Update()
@@ -130,11 +182,58 @@ namespace MRMotifs.SharedAssets
             }
         }
 
+        private void TryEnableOVRRaycaster(GraphicRaycaster existingGraphicRaycaster)
+        {
+            // Look for a type named "OVRRaycaster" in loaded assemblies
+            var ovrType = AppDomain.CurrentDomain
+                .GetAssemblies()
+                .Select(a => a.GetType("OVRRaycaster", false))
+                .FirstOrDefault(t => t != null);
+
+            if (ovrType == null)
+            {
+                // Some packages namespace it under OVR; try a namespaced lookup
+                ovrType = AppDomain.CurrentDomain
+                    .GetAssemblies()
+                    .Select(a => a.GetType("OVR.OVRRaycaster", false))
+                    .FirstOrDefault(t => t != null);
+            }
+
+            if (ovrType != null && !GetComponent(ovrType))
+            {
+                // Add OVRRaycaster and disable the generic GraphicRaycaster to avoid double hits
+                gameObject.AddComponent(ovrType);
+                if (existingGraphicRaycaster) existingGraphicRaycaster.enabled = false;
+            }
+        }
+
+        private void TryEnableTrackedDeviceRaycaster()
+        {
+            var tdrType = AppDomain.CurrentDomain
+                .GetAssemblies()
+                .Select(a => a.GetType("UnityEngine.InputSystem.UI.TrackedDeviceRaycaster", false))
+                .FirstOrDefault(t => t != null);
+
+            if (tdrType != null && !GetComponent(tdrType))
+            {
+                gameObject.AddComponent(tdrType);
+            }
+        }
+
         public void ConfigureSizeMeters(float width, float height)
         {
             widthMeters = width;
             heightMeters = height;
-            if (rectTransform)
+            if (rectTransform && enforceSizeInMeters)
+            {
+                rectTransform.sizeDelta = new Vector2(widthMeters, heightMeters);
+            }
+        }
+
+        public void SetEnforceSizeInMeters(bool enforce)
+        {
+            enforceSizeInMeters = enforce;
+            if (rectTransform && enforceSizeInMeters)
             {
                 rectTransform.sizeDelta = new Vector2(widthMeters, heightMeters);
             }
@@ -163,7 +262,7 @@ namespace MRMotifs.SharedAssets
             runningAnim = StartCoroutine(AnimateDisappear(onComplete));
         }
 
-        private void PlaceForAppearStart()
+        public void PlaceForAppearStart()
         {
             if (!mainCamera) return;
             var cam = mainCamera.transform;
@@ -176,7 +275,7 @@ namespace MRMotifs.SharedAssets
             transform.rotation = Quaternion.LookRotation(forward, Vector3.up);
         }
 
-        private void PlaceAtFinalPose()
+        public void PlaceAtFinalPose()
         {
             if (!mainCamera) return;
             var cam = mainCamera.transform;
@@ -190,16 +289,24 @@ namespace MRMotifs.SharedAssets
 
         private IEnumerator AnimateAppear()
         {
-            if (!mainCamera)
+            // Wait until a camera is ready
+            yield return WaitForCamera();
+
+            Vector3 startPos;
+            Vector3 endPos;
+            if (animateRelativeToSelf || !managePlacement)
             {
-                PlaceForAppearStart();
+                endPos = transform.position;
+                var forwardSelf = transform.forward; forwardSelf.y = 0f; forwardSelf.Normalize();
+                startPos = endPos + forwardSelf * appearFromExtraZ;
             }
-
-            var cam = mainCamera.transform;
-            var forward = cam.forward; forward.y = 0f; forward.Normalize();
-
-            var startPos = cam.position + forward * (distanceMeters + appearFromExtraZ);
-            var endPos = cam.position + forward * distanceMeters;
+            else
+            {
+                var cam = mainCamera.transform;
+                var forward = cam.forward; forward.y = 0f; forward.Normalize();
+                startPos = cam.position + forward * (distanceMeters + appearFromExtraZ);
+                endPos = cam.position + forward * distanceMeters;
+            }
 
             float elapsed = 0f;
             while (elapsed < animateDurationSeconds)
@@ -218,16 +325,24 @@ namespace MRMotifs.SharedAssets
 
         private IEnumerator AnimateDisappear(System.Action onComplete)
         {
-            if (!mainCamera)
+            // Wait until a camera is ready
+            yield return WaitForCamera();
+
+            Vector3 startPos;
+            Vector3 endPos;
+            if (animateRelativeToSelf || !managePlacement)
             {
-                yield break;
+                startPos = transform.position;
+                var forwardSelf = transform.forward; forwardSelf.y = 0f; forwardSelf.Normalize();
+                endPos = startPos + forwardSelf * appearFromExtraZ;
             }
-
-            var cam = mainCamera.transform;
-            var forward = cam.forward; forward.y = 0f; forward.Normalize();
-
-            var startPos = cam.position + forward * distanceMeters;
-            var endPos = cam.position + forward * (distanceMeters + appearFromExtraZ);
+            else
+            {
+                var cam = mainCamera.transform;
+                var forward = cam.forward; forward.y = 0f; forward.Normalize();
+                startPos = cam.position + forward * distanceMeters;
+                endPos = cam.position + forward * (distanceMeters + appearFromExtraZ);
+            }
 
             float elapsed = 0f;
             while (elapsed < animateDurationSeconds)
@@ -249,9 +364,44 @@ namespace MRMotifs.SharedAssets
             if (canvasGroup)
             {
                 canvasGroup.alpha = alpha;
-                canvasGroup.interactable = alpha >= 1f;
-                canvasGroup.blocksRaycasts = alpha > 0.99f;
+                bool isInteractive = alpha >= interactableAlphaThreshold;
+                canvasGroup.interactable = isInteractive;
+                canvasGroup.blocksRaycasts = isInteractive;
             }
+        }
+
+        private IEnumerator WaitForCamera()
+        {
+            while (!mainCamera)
+            {
+                mainCamera = cameraOverride != null ? cameraOverride : Camera.main;
+                if (!mainCamera)
+                {
+                    yield return null;
+                }
+            }
+
+            if (canvas) canvas.worldCamera = mainCamera;
+            // Place the panel relative to the now-available camera before animating
+            if (autoPlayOnEnable && managePlacement)
+            {
+                PlaceForAppearStart();
+            }
+        }
+
+        public void SetAutoPlayOnEnable(bool enabled)
+        {
+            autoPlayOnEnable = enabled;
+        }
+
+        public void SetManagePlacement(bool enabled)
+        {
+            managePlacement = enabled;
+        }
+
+        public void SetAnimateRelativeToSelf(bool enabled)
+        {
+            animateRelativeToSelf = enabled;
         }
     }
 }
