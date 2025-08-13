@@ -1,4 +1,7 @@
 using UnityEngine;
+#if NAUGHTY_ATTRIBUTES
+using NaughtyAttributes;
+#endif
 
 namespace MRMotifs.SharedAssets
 {
@@ -11,6 +14,13 @@ namespace MRMotifs.SharedAssets
     {
         [Tooltip("Panel to control. If not set, will search in parents.")]
         [SerializeField] private WorldSpacePanel targetPanel;
+        
+        [Header("Test Targets (Inspector)")]
+        [Tooltip("Assign a panel to be shown after closing the current one for testing.")]
+        [SerializeField] private GameObject nextPanelForTest;
+        
+        [Tooltip("Assign a panel to show directly for testing.")]
+        [SerializeField] private GameObject panelToShowForTest;
 
         private void Awake()
         {
@@ -55,6 +65,34 @@ namespace MRMotifs.SharedAssets
         public void ShowPanel(GameObject panelToShow)
         {
             if (panelToShow) panelToShow.SetActive(true);
+        }
+
+        // Inspector test helpers (ContextMenu works without any dependencies; NaughtyAttributes buttons if available)
+        [ContextMenu("Test/Close Panel")]
+#if NAUGHTY_ATTRIBUTES
+        [Button("Close Panel (Test)")]
+#endif
+        public void Test_ClosePanel()
+        {
+            ClosePanel();
+        }
+
+        [ContextMenu("Test/Close And Show Next")]
+#if NAUGHTY_ATTRIBUTES
+        [Button("Close And Show Next (Test)")]
+#endif
+        public void Test_CloseAndShow()
+        {
+            CloseAndShow(nextPanelForTest);
+        }
+
+        [ContextMenu("Test/Show Panel")]
+#if NAUGHTY_ATTRIBUTES
+        [Button("Show Panel (Test)")]
+#endif
+        public void Test_ShowPanel()
+        {
+            ShowPanel(panelToShowForTest);
         }
     }
 }
