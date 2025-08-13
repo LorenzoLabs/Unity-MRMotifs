@@ -47,7 +47,6 @@ namespace MRMotifs.SharedAssets
 
         private void Awake()
         {
-            rectTransform = GetComponent<RectTransform>();
             canvas = GetComponent<Canvas>();
             canvasGroup = GetComponent<CanvasGroup>();
 
@@ -68,10 +67,12 @@ namespace MRMotifs.SharedAssets
                 Destroy(scaler);
             }
 
-            // Size in meters (Unity units)
+            // Size in meters (Unity units). Fetch RectTransform AFTER ensuring Canvas,
+            // because adding a Canvas converts Transform to RectTransform.
+            rectTransform = GetComponent<RectTransform>();
             if (!rectTransform)
             {
-                rectTransform = gameObject.AddComponent<RectTransform>();
+                rectTransform = transform as RectTransform;
             }
             rectTransform.sizeDelta = new Vector2(widthMeters, heightMeters);
             rectTransform.localScale = Vector3.one; // 1 unit == 1 meter
